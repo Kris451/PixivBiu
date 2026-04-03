@@ -450,7 +450,7 @@
                     }
                     li += '<a target="_blank" href="https://www.pixiv.net/users/' + data[0]['author']['id'] + '"><d class="tooltip" title="打开画师 Pixiv 主页">Pixiv</d></a>';
                     li += '<a target="_blank" href=".?code=%40u%3D' + data[0]['author']['id'] + '%20-f"><op class="tooltip" title="获取 TA 的关注列表">关注列表</op></a>';
-                    li += '<a target="_blank" href=".?code=%40u%3D' + data[0]['author']['id'] + '%20-m"><sf class="tooltip" title="获取 TA 的作品收藏">作品收藏</op></a>';
+                    li += '<a target="_blank" href=".?code=%40u%3D' + data[0]['author']['id'] + '%20-m"><sf class="tooltip" title="获取 TA 的作品收藏">作品收藏</sf></a>';
                     rstHtml += '<article class="thumb"><a class="imageBtn"><img src="' + data[0]['all']['user']['profile_image_urls']['medium'].replace('i.pximg.net', 'i.pixiv.re') + '" alt="" /></a><h2>画师@' + data[0]['author']['name'] + '</h2><section class="thumbAction">' + li + '</section></article>';
                 }
 
@@ -463,7 +463,7 @@
                         li = '<a id="follow_' + data[i]['id'] + '" href="javascript: doFollow(' + data[i]['id'] + ', \'add\');"><b class="tooltip" title="关注"><hicon>💗</hicon></b></a>';
                     }
                     li += '<a target="_blank" href=".?code=%40u%3D' + data[i]['id'] + '%20-i"><d class="tooltip" title="获取 TA 的插画作品">插画</d></a>';
-                    li += '<a target="_blank" href=".?code=%40u%3D' + data[i]['id'] + '%20-c"><op class="tooltip" title="获取 TA 的漫画作品">漫画</d></a>';
+                    li += '<a target="_blank" href=".?code=%40u%3D' + data[i]['id'] + '%20-c"><op class="tooltip" title="获取 TA 的漫画作品">漫画</op></a>';
                     rstHtml += '<article class="thumb"><a class="imageBtn"><img src="' + data[i]['profile_image_urls']['medium'].replace('i.pximg.net', 'i.pixiv.re') + '" alt="" /></a><h2>' + data[i]['name'] + '</h2><section class="thumbAction">' + li + '</section></article>';
                 }
 
@@ -679,7 +679,7 @@
 
                 // 输出
                 if (rstHtml === "")
-                    rstHtml = "<div style='width: 100%; text-align: center;'><h2>在此筛选条件下就没有作品了...<h2></div>";
+                    rstHtml = "<div style='width: 100%; text-align: center;'><h2>在此筛选条件下就没有作品了...</h2></div>";
                 $('#main').html(rstHtml);
 
                 if ($.inArray('header', reLoadList) >= 0) {
