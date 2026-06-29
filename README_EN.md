@@ -19,7 +19,7 @@ PixivBiu, a handy companion tool for Pixiv.
 ## Usage
 
 1. Head to [Releases](https://github.com/txperl/PixivBiu/releases) and download the package for your system
-2. Unzip and run the `pixivbiu` file
+2. Unzip and run the `PixivBiu` file
 3. Open [http://127.0.0.1:4001](http://127.0.0.1:4001) in your browser
 
 ## Configuration
@@ -78,11 +78,11 @@ git clone https://github.com/txperl/PixivBiu.git
 cd PixivBiu
 
 # build frontend + backend
-# the resulting bin/pixivbiu has the frontend embedded
+# the resulting bin/PixivBiu has the frontend embedded
 make dist
 
 # run
-./bin/pixivbiu
+./bin/PixivBiu
 ```
 
 ### Local Development

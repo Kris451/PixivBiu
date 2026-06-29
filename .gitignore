@@ -33,6 +33,11 @@
 *.so
 *.dylib
 
+# Windows resource objects (icon + version info), generated from
+# cmd/server/versioninfo.json + icon.ico by `go generate ./cmd/server` and by
+# GoReleaser's before-hook. Build artifacts — the .ico + .json are the source.
+/cmd/server/*.syso
+
 # Test binary, built with `go test -c`
 *.test
 

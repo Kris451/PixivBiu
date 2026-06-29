@@ -19,7 +19,7 @@ PixivBiu，一款不错的 Pixiv 辅助工具。
 ## 使用
 
 1. 前往 [Releases](https://github.com/txperl/PixivBiu/releases)，下载对应系统的程序包
-2. 解压并运行 `pixivbiu` 文件
+2. 解压并运行 `PixivBiu` 文件
 3. 在浏览器中打开 [http://127.0.0.1:4001](http://127.0.0.1:4001) 即可
 
 ## 配置
@@ -78,11 +78,11 @@ git clone https://github.com/txperl/PixivBiu.git
 cd PixivBiu
 
 # 构建前端与后端
-# 产出的 bin/pixivbiu 已将前端内嵌
+# 产出的 bin/PixivBiu 已将前端内嵌
 make dist
 
 # 执行
-./bin/pixivbiu
+./bin/PixivBiu
 ```
 
 ### 本地开发

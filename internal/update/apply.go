@@ -10,8 +10,9 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"os"
 	"path"
-	"runtime"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -84,7 +85,16 @@ func (s *Service) Apply(ctx context.Context) error {
 		return refusedf("checksum mismatch for %s: refusing to apply", name)
 	}
 
-	bin, err := extractBinary(name, archive)
+	// preferred is the running executable's own base name. It disambiguates the
+	// archive's binary when several executables are bundled (the member named
+	// like us wins); best-effort, so an os.Executable failure just leaves the
+	// sole-executable fallback to do the job.
+	preferred := ""
+	if exe, err := os.Executable(); err == nil {
+		preferred = filepath.Base(exe)
+	}
+
+	bin, err := extractBinary(name, archive, preferred)
 	if err != nil {
 		return internalErr("could not extract the update archive", err)
 	}
@@ -99,15 +109,6 @@ func (s *Service) Apply(ctx context.Context) error {
 	return nil
 }
 
-// binaryName is the executable's name inside the GoReleaser archive
-// (.goreleaser.yaml `binary: pixivbiu`), with the platform extension.
-func binaryName() string {
-	if runtime.GOOS == "windows" {
-		return "pixivbiu.exe"
-	}
-	return "pixivbiu"
-}
-
 // download fetches url fully into memory under a generous deadline. Archives
 // are small enough that buffering avoids a temp-file dance; selfupdate streams
 // the extracted binary from the buffer. It shares fetchBytes' transport + error
@@ -119,13 +120,22 @@ func (s *Service) download(ctx context.Context, url string) ([]byte, error) {
 	return s.fetchBytes(ctx, url, maxDownload)
 }
 
-// extractBinary returns the PixivBiu executable bytes from a release archive.
-// archiveName's extension selects the format: .zip (Windows) or .tar.gz.
-func extractBinary(archiveName string, data []byte) ([]byte, error) {
+// extractBinary returns the application's executable bytes from a release
+// archive. archiveName's extension selects the format: .zip (Windows) or
+// .tar.gz. The binary is found by name-independent structure — the .exe files
+// (zip) or execute-bit files (tar) — then disambiguated by `preferred` (the
+// running executable's own base name): the member named like us wins, so an
+// archive that bundles several executables still resolves to the app binary.
+// With no match (preferred empty, or the binary was renamed since the running
+// build shipped) it falls back to the lone executable, and refuses if several
+// are present but none matches — never guessing which is the app binary. This
+// keeps self-update working across a binary rename without picking the wrong
+// file out of a multi-executable archive.
+func extractBinary(archiveName string, data []byte, preferred string) ([]byte, error) {
 	if strings.HasSuffix(archiveName, ".zip") {
-		return extractFromZip(data)
+		return extractFromZip(data, preferred)
 	}
-	return extractFromTarGz(data)
+	return extractFromTarGz(data, preferred)
 }
 
 // readCapped reads all of r but refuses a stream larger than limit. It reads one
@@ -145,7 +155,7 @@ func readCapped(r io.Reader, limit int64) ([]byte, error) {
 	return b, nil
 }
 
-func extractFromTarGz(data []byte) ([]byte, error) {
+func extractFromTarGz(data []byte, preferred string) ([]byte, error) {
 	gz, err := gzip.NewReader(bytes.NewReader(data))
 	if err != nil {
 		return nil, fmt.Errorf("open gzip: %w", err)
@@ -153,7 +163,10 @@ func extractFromTarGz(data []byte) ([]byte, error) {
 	defer gz.Close()
 
 	tr := tar.NewReader(gz)
-	want := binaryName()
+	var (
+		candidates []string // base names of every executable member, for diagnostics
+		soleBytes  []byte   // bytes of the first executable, used iff it is the only one
+	)
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -162,30 +175,74 @@ func extractFromTarGz(data []byte) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("read tar: %w", err)
 		}
-		if hdr.Typeflag != tar.TypeReg || path.Base(hdr.Name) != want {
+		// Executable members are identified by an execute bit, not a name:
+		// GoReleaser ships the binary 0755 and the bundled docs (README/LICENSE/
+		// CHANGELOG) 0644.
+		if hdr.Typeflag != tar.TypeReg || hdr.FileInfo().Mode().Perm()&0o111 == 0 {
 			continue
 		}
-		return readCapped(tr, maxDownload)
+		base := path.Base(hdr.Name)
+		if strings.EqualFold(base, preferred) {
+			return readCapped(tr, maxDownload) // member named like us wins outright
+		}
+		candidates = append(candidates, base)
+		if len(candidates) == 1 {
+			// Hold the first candidate for the single-executable fallback; a second
+			// makes the choice ambiguous and these bytes go unused.
+			if soleBytes, err = readCapped(tr, maxDownload); err != nil {
+				return nil, err
+			}
+		}
 	}
-	return nil, fmt.Errorf("archive does not contain %s", want)
+	switch len(candidates) {
+	case 0:
+		return nil, fmt.Errorf("archive contains no executable binary")
+	case 1:
+		return soleBytes, nil
+	default:
+		return nil, fmt.Errorf("archive bundles multiple executables %v but none is named %q", candidates, preferred)
+	}
 }
 
-func extractFromZip(data []byte) ([]byte, error) {
+func extractFromZip(data []byte, preferred string) ([]byte, error) {
 	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		return nil, fmt.Errorf("open zip: %w", err)
 	}
-	want := binaryName()
+	// Executable members in a Windows archive are the .exe files; the bundled
+	// docs (README/LICENSE/CHANGELOG) never are.
+	var (
+		candidates []string
+		sole       *zip.File
+	)
 	for _, f := range zr.File {
-		if path.Base(f.Name) != want {
+		base := path.Base(f.Name)
+		if !strings.HasSuffix(strings.ToLower(base), ".exe") {
 			continue
 		}
-		rc, err := f.Open()
-		if err != nil {
-			return nil, fmt.Errorf("open %s in zip: %w", want, err)
+		if strings.EqualFold(base, preferred) {
+			return openZipFile(f) // member named like us wins outright
 		}
-		defer rc.Close()
-		return readCapped(rc, maxDownload)
+		candidates = append(candidates, base)
+		if sole == nil {
+			sole = f
+		}
 	}
-	return nil, fmt.Errorf("archive does not contain %s", want)
+	switch len(candidates) {
+	case 0:
+		return nil, fmt.Errorf("archive contains no .exe binary")
+	case 1:
+		return openZipFile(sole)
+	default:
+		return nil, fmt.Errorf("archive bundles multiple .exe binaries %v but none is named %q", candidates, preferred)
+	}
+}
+
+func openZipFile(f *zip.File) ([]byte, error) {
+	rc, err := f.Open()
+	if err != nil {
+		return nil, fmt.Errorf("open %s in zip: %w", path.Base(f.Name), err)
+	}
+	defer rc.Close()
+	return readCapped(rc, maxDownload)
 }

@@ -1,7 +1,10 @@
 package update
 
 import (
+	"archive/tar"
+	"archive/zip"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -91,5 +94,180 @@ func TestReadCapped(t *testing.T) {
 	// Under the cap → returned verbatim.
 	if b, err := readCapped(bytes.NewReader([]byte("hello")), 10); err != nil || string(b) != "hello" {
 		t.Errorf("readCapped(5, limit 10) = (%q, %v); want (hello, nil)", b, err)
+	}
+}
+
+type tarEntry struct {
+	mode int64
+	data []byte
+}
+
+func makeTarGz(t *testing.T, files map[string]tarEntry) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	for name, f := range files {
+		if err := tw.WriteHeader(&tar.Header{Name: name, Mode: f.mode, Size: int64(len(f.data)), Typeflag: tar.TypeReg}); err != nil {
+			t.Fatalf("write tar header: %v", err)
+		}
+		if _, err := tw.Write(f.data); err != nil {
+			t.Fatalf("write tar data: %v", err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("close gzip: %v", err)
+	}
+	return buf.Bytes()
+}
+
+func makeZip(t *testing.T, files map[string][]byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for name, data := range files {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatalf("create zip entry: %v", err)
+		}
+		if _, err := w.Write(data); err != nil {
+			t.Fatalf("write zip entry: %v", err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("close zip: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// Extraction locates the binary structurally, not by a hardcoded filename: in a
+// tar.gz it's the lone regular file with an execute bit (GoReleaser ships the
+// binary 0755, docs 0644), so a binary rename can't break self-update.
+func TestExtractBinaryTarGzPicksExecutable(t *testing.T) {
+	bin := []byte("\x7fELF fake binary bytes")
+	data := makeTarGz(t, map[string]tarEntry{
+		"README.md": {mode: 0o644, data: []byte("# docs")},
+		"PixivBiu":  {mode: 0o755, data: bin},
+		"LICENSE":   {mode: 0o644, data: []byte("MIT")},
+	})
+	got, err := extractBinary("PixivBiu_3.1.0_linux_amd64.tar.gz", data, "PixivBiu")
+	if err != nil {
+		t.Fatalf("extractBinary: %v", err)
+	}
+	if !bytes.Equal(got, bin) {
+		t.Errorf("extracted %q, want the executable bytes %q", got, bin)
+	}
+}
+
+func TestExtractBinaryTarGzNoExecutable(t *testing.T) {
+	data := makeTarGz(t, map[string]tarEntry{
+		"README.md": {mode: 0o644, data: []byte("# docs")},
+		"LICENSE":   {mode: 0o644, data: []byte("MIT")},
+	})
+	if _, err := extractBinary("x_linux_amd64.tar.gz", data, "PixivBiu"); err == nil {
+		t.Fatal("extractBinary on a docs-only archive = nil error; want an error")
+	}
+}
+
+// In a Windows zip the binary is the sole .exe; docs never are. Match on the
+// extension, not a literal name.
+func TestExtractBinaryZipPicksExe(t *testing.T) {
+	bin := []byte("MZ fake windows binary")
+	data := makeZip(t, map[string][]byte{
+		"README.md":    []byte("# docs"),
+		"PixivBiu.exe": bin,
+	})
+	got, err := extractBinary("PixivBiu_3.1.0_windows_amd64.zip", data, "PixivBiu.exe")
+	if err != nil {
+		t.Fatalf("extractBinary: %v", err)
+	}
+	if !bytes.Equal(got, bin) {
+		t.Errorf("extracted %q, want the exe bytes %q", got, bin)
+	}
+}
+
+func TestExtractBinaryZipNoExe(t *testing.T) {
+	data := makeZip(t, map[string][]byte{
+		"README.md": []byte("# docs"),
+		"LICENSE":   []byte("MIT"),
+	})
+	if _, err := extractBinary("x_windows_amd64.zip", data, "PixivBiu.exe"); err == nil {
+		t.Fatal("extractBinary on an exe-less zip = nil error; want an error")
+	}
+}
+
+// With several executables bundled, the member named like the running binary
+// (preferred) wins — not whichever happens to come first.
+func TestExtractBinaryTarGzMultiplePrefersNamed(t *testing.T) {
+	want := []byte("\x7fELF the real app binary")
+	data := makeTarGz(t, map[string]tarEntry{
+		"README.md":    {mode: 0o644, data: []byte("# docs")},
+		"helper":       {mode: 0o755, data: []byte("\x7fELF a bundled helper")},
+		"PixivBiu":     {mode: 0o755, data: want},
+		"post-install": {mode: 0o755, data: []byte("#!/bin/sh\n")},
+	})
+	got, err := extractBinary("PixivBiu_3.1.0_linux_amd64.tar.gz", data, "PixivBiu")
+	if err != nil {
+		t.Fatalf("extractBinary: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Errorf("extracted %q, want the PixivBiu bytes %q", got, want)
+	}
+}
+
+func TestExtractBinaryZipMultiplePrefersNamed(t *testing.T) {
+	want := []byte("MZ the real app binary")
+	data := makeZip(t, map[string][]byte{
+		"README.md":    []byte("# docs"),
+		"helper.exe":   []byte("MZ a bundled helper"),
+		"PixivBiu.exe": want,
+	})
+	got, err := extractBinary("PixivBiu_3.1.0_windows_amd64.zip", data, "PixivBiu.exe")
+	if err != nil {
+		t.Fatalf("extractBinary: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Errorf("extracted %q, want the PixivBiu.exe bytes %q", got, want)
+	}
+}
+
+// A binary renamed since the running build shipped: no member matches preferred,
+// but there is exactly one executable, so the fallback installs it.
+func TestExtractBinaryTarGzRenamedFallsBackToSole(t *testing.T) {
+	want := []byte("\x7fELF renamed binary")
+	data := makeTarGz(t, map[string]tarEntry{
+		"README.md": {mode: 0o644, data: []byte("# docs")},
+		"PixivPro":  {mode: 0o755, data: want},
+	})
+	got, err := extractBinary("PixivPro_4.0.0_linux_amd64.tar.gz", data, "PixivBiu")
+	if err != nil {
+		t.Fatalf("extractBinary: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Errorf("extracted %q, want the sole executable %q", got, want)
+	}
+}
+
+// Several executables and none named like us: refuse rather than guess.
+func TestExtractBinaryTarGzAmbiguousErrors(t *testing.T) {
+	data := makeTarGz(t, map[string]tarEntry{
+		"alpha": {mode: 0o755, data: []byte("\x7fELF a")},
+		"beta":  {mode: 0o755, data: []byte("\x7fELF b")},
+	})
+	if _, err := extractBinary("x_linux_amd64.tar.gz", data, "PixivBiu"); err == nil {
+		t.Fatal("extractBinary on an ambiguous multi-executable archive = nil error; want an error")
+	}
+}
+
+func TestExtractBinaryZipAmbiguousErrors(t *testing.T) {
+	data := makeZip(t, map[string][]byte{
+		"alpha.exe": []byte("MZ a"),
+		"beta.exe":  []byte("MZ b"),
+	})
+	if _, err := extractBinary("x_windows_amd64.zip", data, "PixivBiu.exe"); err == nil {
+		t.Fatal("extractBinary on an ambiguous multi-.exe archive = nil error; want an error")
 	}
 }

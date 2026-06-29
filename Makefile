@@ -1,6 +1,6 @@
-.PHONY: help gen-backend gen-frontend dev build build-web dist test tidy fmt vet clean
+.PHONY: help gen-backend gen-frontend gen-winres dev build build-web dist test tidy fmt vet clean
 
-BIN       := bin/pixivbiu
+BIN       := bin/PixivBiu
 PKG       := ./cmd/server
 OAPI_CFG  := api/cfg.yaml
 OAPI_SPEC := api/openapi.yaml
@@ -19,6 +19,9 @@ gen-backend:  ## Generate server code from the OpenAPI spec
 
 gen-frontend:  ## Generate frontend OpenAPI types (requires `make dev` running)
 	cd frontend && bun run gen:api
+
+gen-winres:  ## Generate Windows .exe resources (icon + version info) into cmd/server/*.syso
+	go generate ./cmd/server
 
 dev:  ## Run the server (port pinned so the Vite proxy / gen:api stay valid; browser auto-open off — use the Vite dev server on :5173)
 	PIXIVBIU_SERVER_PORT_FALLBACK=false go run $(PKG) -config ./usr/settings.json -open=false

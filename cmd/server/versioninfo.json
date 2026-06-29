@@ -1,0 +1,18 @@
+{
+  "FixedFileInfo": {
+    "FileFlagsMask": "3f",
+    "FileOS": "040004",
+    "FileType": "01"
+  },
+  "StringFileInfo": {
+    "CompanyName": "txperl",
+    "FileDescription": "PixivBiu",
+    "InternalName": "PixivBiu",
+    "OriginalFilename": "PixivBiu.exe",
+    "ProductName": "PixivBiu"
+  },
+  "VarFileInfo": {
+    "Translation": { "LangID": "0409", "CharsetID": "04B0" }
+  },
+  "IconPath": "icon.ico"
+}

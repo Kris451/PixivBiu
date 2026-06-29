@@ -41,7 +41,7 @@ ARG TARGETARCH
 # Both binaries build in one layer; they share the warm module cache.
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
       go build -trimpath -buildvcs=false \
-        -ldflags "-s -w -X main.version=${VERSION}" -o /out/pixivbiu ./cmd/server \
+        -ldflags "-s -w -X main.version=${VERSION}" -o /out/PixivBiu ./cmd/server \
  && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
       go build -trimpath -buildvcs=false -ldflags "-s -w" -o /out/healthcheck ./cmd/healthcheck
 
@@ -56,7 +56,7 @@ LABEL org.opencontainers.image.source="https://github.com/txperl/PixivBiu" \
       org.opencontainers.image.description="Pixiv artwork browsing, searching, and downloading tool" \
       org.opencontainers.image.licenses="MIT"
 
-COPY --from=build /out/pixivbiu /pixivbiu
+COPY --from=build /out/PixivBiu /PixivBiu
 COPY --from=build /out/healthcheck /healthcheck
 COPY --from=build --chown=65532:65532 /out/data /data
 COPY --from=build --chown=65532:65532 /out/downloads /downloads
@@ -80,4 +80,4 @@ USER nonroot
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD ["/healthcheck"]
 
-ENTRYPOINT ["/pixivbiu"]
+ENTRYPOINT ["/PixivBiu"]
