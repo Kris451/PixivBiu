@@ -17,7 +17,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { useMessages } from "@/i18n";
 import { ExternalLinkIcon } from "@/lib/icons";
 
-// Element styles for the GitHub-generated release-notes markdown. react-markdown
+// Element styles for the GoReleaser-generated release-notes markdown. react-markdown
 // (v10) does not render raw HTML by default, so the body is safe to render inline.
 // The project ships no @tailwindcss/typography plugin, so each element is mapped
 // here to a compact, muted scale.

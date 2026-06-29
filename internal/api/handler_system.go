@@ -16,7 +16,7 @@ import (
 const applyWriteDeadline = 15 * time.Minute
 
 // checkWriteDeadline bounds the CheckForUpdate response write. Check contacts
-// GitHub with its own ~20s budget (fetchReleases), which can outlast the
+// the update feed with its own ~20s budget (fetchManifest), which can outlast the
 // server's default 15s write timeout on a slow network/proxy; without extending
 // the deadline the 200/502 would be written too late and the client would see a
 // dropped request instead of the result. Must exceed that ~20s check budget.
@@ -64,18 +64,18 @@ func (h *APIHandler) GetUpdateStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, updateStatusToWire(h.upd.Status()))
 }
 
-// CheckForUpdate forces a fresh check against GitHub and returns the result.
-// Categorized failures are mapped by updateFailure: a refusal (e.g. no
-// applicable release) is a 400, a GitHub reachability failure is a 502. The
-// cached status (with last_error set) is also updated so a subsequent GET
-// reflects it.
+// CheckForUpdate forces a fresh check against the release feed and returns the
+// result. Categorized failures are mapped by updateFailure: a refusal (e.g. no
+// applicable release, or a feed that fails signature verification) is a 400, a
+// feed reachability failure is a 502. The cached status (with last_error set) is
+// also updated so a subsequent GET reflects it.
 func (h *APIHandler) CheckForUpdate(w http.ResponseWriter, r *http.Request) {
 	if err := h.requireAuth(); err != nil {
 		WriteError(w, r, err)
 		return
 	}
-	// Check's GitHub fetch can outlast the server's default 15s write timeout on
-	// a slow network/proxy; extend the deadline (as ApplyUpdate does) so the real
+	// Check's feed fetch can outlast the server's default 15s write timeout on a
+	// slow network/proxy; extend the deadline (as ApplyUpdate does) so the real
 	// 200/502 still reaches the client. Mirrors the SSE opt-out (internal/inbox/sse.go).
 	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(checkWriteDeadline))
 	st, err := h.upd.Check(r.Context())
@@ -93,7 +93,7 @@ func (h *APIHandler) CheckForUpdate(w http.ResponseWriter, r *http.Request) {
 // replaces the binary, and Apply itself rejects a concurrent run (409). Other
 // failures are categorized by updateFailure: authored refusals (dev build, no
 // asset, checksum mismatch, already up-to-date) surface as a 400 with the
-// message; GitHub/download failures as a 502; local apply failures as a 500.
+// message; feed/download failures as a 502; local apply failures as a 500.
 func (h *APIHandler) ApplyUpdate(w http.ResponseWriter, r *http.Request) {
 	if err := h.requireAuth(); err != nil {
 		WriteError(w, r, err)
@@ -129,15 +129,15 @@ func (h *APIHandler) ApplyUpdate(w http.ResponseWriter, r *http.Request) {
 	h.restart()
 }
 
-// updateUpstreamMessage is shown when the updater can't reach GitHub or download
-// a release asset. It names the update server on purpose: the failing upstream
-// here is GitHub, not Pixiv, so it must NOT fall back to the generic
-// upstream_error copy ("Pixiv is temporarily unavailable").
-const updateUpstreamMessage = "Couldn't reach the update server (GitHub). Check your network or proxy and try again."
+// updateUpstreamMessage is shown when the updater can't reach the release feed or
+// download a release archive. It names the update server on purpose: the failing
+// upstream here is the update CDN, not Pixiv, so it must NOT fall back to the
+// generic upstream_error copy ("Pixiv is temporarily unavailable").
+const updateUpstreamMessage = "Couldn't reach the update server. Check your network or proxy and try again."
 
 // updateFailure maps a categorized *update.Error onto the wire error with the
 // right HTTP status. Authored refusals are shown verbatim (400); a rejected
-// concurrent apply is shown verbatim (409); GitHub/download transport or HTTP
+// concurrent apply is shown verbatim (409); feed/download transport or HTTP
 // failures get an update-specific upstream message (502); local apply failures
 // fall through to classify as a generic internal error (500), with full detail
 // logged.
@@ -156,7 +156,7 @@ func updateFailure(err error) error {
 	case update.KindUpstream:
 		// Update-specific message, shown verbatim. Leaving it empty would let the
 		// frontend localize code=upstream_error as a *Pixiv* outage, which is
-		// wrong here — the upstream is GitHub. The code still maps to 502.
+		// wrong here — the upstream is the update CDN. The code still maps to 502.
 		return &updateUserError{cause: ue, message: updateUpstreamMessage, code: ErrorCodeUpstreamError}
 	default: // KindInternal: generic 500 via classify, full detail logged.
 		return err

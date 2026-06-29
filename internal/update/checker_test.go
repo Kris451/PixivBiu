@@ -2,6 +2,7 @@ package update
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -9,6 +10,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"aead.dev/minisign"
 
 	"github.com/txperl/PixivBiu/internal/config"
 )
@@ -61,51 +64,68 @@ func TestAssetName(t *testing.T) {
 	}
 }
 
-// mockReleases serves a GitHub /releases response built from the given list.
-func mockReleases(t *testing.T, releases []ghRelease) *httptest.Server {
+// serveManifest serves the given manifest bytes at /manifest.json and the given
+// detached signature at /manifest.json.minisig, returning the feed base URL.
+func serveManifest(t *testing.T, data, sig []byte) string {
 	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("User-Agent") == "" {
 			t.Errorf("request missing User-Agent header")
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(releases)
+		switch r.URL.Path {
+		case "/manifest.json":
+			_, _ = w.Write(data)
+		case "/manifest.json.minisig":
+			_, _ = w.Write(sig)
+		default:
+			http.NotFound(w, r)
+		}
 	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
 }
 
-func newTestService(t *testing.T, current, channel, url string) *Service {
+// signedFeed builds a manifest from releases, signs it with a fresh minisign key,
+// serves it, and returns the feed base URL plus the trusted public key (base64).
+func signedFeed(t *testing.T, releases []releaseEntry) (feedURL, pubKey string) {
 	t.Helper()
-	orig := githubAPI
-	githubAPI = url
-	t.Cleanup(func() { githubAPI = orig })
-	return NewService(current, "txperl", "PixivBiu", config.UpdateConfig{
+	pub, priv, err := minisign.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	data, err := json.Marshal(manifest{Schema: 1, Releases: releases})
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+	return serveManifest(t, data, minisign.Sign(priv, data)), pub.String()
+}
+
+// newTestService wires a Service to a freshly-signed feed built from releases.
+func newTestService(t *testing.T, current, channel string, releases []releaseEntry) *Service {
+	t.Helper()
+	feedURL, pubKey := signedFeed(t, releases)
+	return NewService(current, feedURL, []string{pubKey}, config.UpdateConfig{
 		Enabled: true,
 		Channel: channel,
 	}, "")
 }
 
-// withAssets attaches the archive for the running platform plus checksums.txt
-// to r, so Check treats the release as installable here (mirrors a real
-// GoReleaser release). The names are built from assetName so the fixture stays
-// correct on whatever OS/arch the test runs on.
-func withAssets(r ghRelease) ghRelease {
-	name := assetName(r.TagName)
-	r.Assets = []ghAsset{
-		{Name: name, BrowserDownloadURL: "https://example/" + name},
-		{Name: "checksums.txt", BrowserDownloadURL: "https://example/checksums.txt"},
-	}
+// withAssets attaches the archive for the running platform to r, so Check treats
+// the release as installable here (mirrors a real release). The name is built
+// from assetName so the fixture stays correct on whatever OS/arch the test runs
+// on; the SHA-256 is a placeholder (Check only gates on the asset's presence).
+func withAssets(r releaseEntry) releaseEntry {
+	name := assetName(r.Tag)
+	r.Assets = []asset{{Name: name, URL: "https://example/" + name, SHA256: "00"}}
 	return r
 }
 
 func TestCheckUpdateAvailable(t *testing.T) {
-	ts := mockReleases(t, []ghRelease{
-		{TagName: "v3.0.0", HTMLURL: "https://example/v3.0.0"},
-		withAssets(ghRelease{TagName: "v3.1.0", HTMLURL: "https://example/v3.1.0"}),
-		{TagName: "v2.6.4b"}, // legacy non-semver, must be ignored
+	s := newTestService(t, "3.0.0", "stable", []releaseEntry{
+		{Tag: "v3.0.0", HTMLURL: "https://example/v3.0.0"},
+		withAssets(releaseEntry{Tag: "v3.1.0", HTMLURL: "https://example/v3.1.0"}),
+		{Tag: "v2.6.4b"}, // legacy non-semver, must be ignored
 	})
-	defer ts.Close()
-
-	s := newTestService(t, "3.0.0", "stable", ts.URL)
 	st, err := s.Check(context.Background())
 	if err != nil {
 		t.Fatalf("Check: %v", err)
@@ -126,12 +146,11 @@ func TestCheckUpdateAvailable(t *testing.T) {
 // a stable, a beta, and an alpha; each channel should resolve to the newest tag
 // it's allowed to see.
 func TestCheckChannelFloors(t *testing.T) {
-	// Filtering keys off the tag suffix (via releaseRank), not GitHub's
-	// prerelease bool, so the fixtures omit it.
-	releases := []ghRelease{
-		withAssets(ghRelease{TagName: "v3.0.0", HTMLURL: "https://example/v3.0.0"}),
-		withAssets(ghRelease{TagName: "v3.2.0-beta.1", HTMLURL: "https://example/beta"}),
-		withAssets(ghRelease{TagName: "v3.3.0-alpha.1", HTMLURL: "https://example/alpha"}),
+	// Filtering keys off the tag suffix (via releaseRank), not a prerelease bool.
+	releases := []releaseEntry{
+		withAssets(releaseEntry{Tag: "v3.0.0", HTMLURL: "https://example/v3.0.0"}),
+		withAssets(releaseEntry{Tag: "v3.2.0-beta.1", HTMLURL: "https://example/beta"}),
+		withAssets(releaseEntry{Tag: "v3.3.0-alpha.1", HTMLURL: "https://example/alpha"}),
 	}
 
 	cases := []struct {
@@ -150,9 +169,7 @@ func TestCheckChannelFloors(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.channel, func(t *testing.T) {
-			ts := mockReleases(t, releases)
-			defer ts.Close()
-			s := newTestService(t, "3.0.0", c.channel, ts.URL)
+			s := newTestService(t, "3.0.0", c.channel, releases)
 			st, err := s.Check(context.Background())
 			if err != nil {
 				t.Fatalf("Check: %v", err)
@@ -168,12 +185,9 @@ func TestCheckChannelFloors(t *testing.T) {
 }
 
 func TestCheckDevBuildNeverOffersUpdate(t *testing.T) {
-	ts := mockReleases(t, []ghRelease{
-		{TagName: "v9.9.9", HTMLURL: "https://example/v9.9.9"},
+	s := newTestService(t, "0.1.0-dev", "stable", []releaseEntry{
+		withAssets(releaseEntry{Tag: "v9.9.9", HTMLURL: "https://example/v9.9.9"}),
 	})
-	defer ts.Close()
-
-	s := newTestService(t, "0.1.0-dev", "stable", ts.URL)
 	st, err := s.Check(context.Background())
 	if err != nil {
 		t.Fatalf("Check: %v", err)
@@ -191,32 +205,29 @@ func TestCheckDevBuildNeverOffersUpdate(t *testing.T) {
 }
 
 // A newer release is only advertised as available when it actually ships an
-// installable artifact for this platform (archive + checksums.txt); otherwise
-// Apply would refuse it. The latest version is still surfaced for display, but
-// without an offer or an asset name.
+// installable archive for this platform; otherwise Apply would refuse it. The
+// latest version is still surfaced for display, but without an offer or an asset
+// name.
 func TestCheckOnlyOffersApplicableReleases(t *testing.T) {
 	const v = "v3.1.0"
-	archive := ghAsset{Name: assetName(v), BrowserDownloadURL: "https://example/a"}
-	sums := ghAsset{Name: "checksums.txt", BrowserDownloadURL: "https://example/c"}
+	archive := asset{Name: assetName(v), URL: "https://example/a", SHA256: "00"}
 
 	cases := map[string]struct {
-		assets        []ghAsset
+		assets        []asset
 		wantAvailable bool
 	}{
-		"archive and checksums":    {[]ghAsset{archive, sums}, true},
-		"archive but no checksums": {[]ghAsset{archive}, false},
-		"checksums but no archive": {[]ghAsset{sums}, false},
-		"no assets at all":         {nil, false},
+		"archive for this platform": {[]asset{archive}, true},
+		"no archive for any":        {nil, false},
+		"archive for another OS": {[]asset{{
+			Name: "PixivBiu_3.1.0_someos_somearch.tar.gz", URL: "https://example/x", SHA256: "00",
+		}}, false},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
-			ts := mockReleases(t, []ghRelease{
-				{TagName: "v3.0.0"},
-				{TagName: v, HTMLURL: "https://example/v3.1.0", Assets: c.assets},
+			s := newTestService(t, "3.0.0", "stable", []releaseEntry{
+				{Tag: "v3.0.0"},
+				{Tag: v, HTMLURL: "https://example/v3.1.0", Assets: c.assets},
 			})
-			defer ts.Close()
-
-			s := newTestService(t, "3.0.0", "stable", ts.URL)
 			st, err := s.Check(context.Background())
 			if err != nil {
 				t.Fatalf("Check: %v", err)
@@ -240,14 +251,11 @@ func TestCheckOnlyOffersApplicableReleases(t *testing.T) {
 // just the newest hop — with each body sanitized (commit SHA + "(@author)" + the
 // per-release "## Changelog" heading stripped).
 func TestCheckAggregatesNotesAcrossVersions(t *testing.T) {
-	ts := mockReleases(t, []ghRelease{
-		{TagName: "v3.1.0", Body: "## Changelog\n### Features\n* 12d8eaacc0b65e76dede78bc67252c8f3be31827: feat: thing one (@txperl)"},
-		{TagName: "v3.2.0", Body: "## Changelog\n### Bug fixes\n* a6f4c52a5b4900fef85a47c7eaf523c758d0c4c3: fix: thing two (@txperl)"},
-		withAssets(ghRelease{TagName: "v3.3.0", HTMLURL: "https://example/v3.3.0", Body: "## Changelog\n### Features\n* fbb56ddb997b8608aae3cd048f3ecae5b6543025: feat: thing three (@txperl)"}),
+	s := newTestService(t, "3.0.0", "stable", []releaseEntry{
+		{Tag: "v3.1.0", Notes: "## Changelog\n### Features\n* 12d8eaacc0b65e76dede78bc67252c8f3be31827: feat: thing one (@txperl)"},
+		{Tag: "v3.2.0", Notes: "## Changelog\n### Bug fixes\n* a6f4c52a5b4900fef85a47c7eaf523c758d0c4c3: fix: thing two (@txperl)"},
+		withAssets(releaseEntry{Tag: "v3.3.0", HTMLURL: "https://example/v3.3.0", Notes: "## Changelog\n### Features\n* fbb56ddb997b8608aae3cd048f3ecae5b6543025: feat: thing three (@txperl)"}),
 	})
-	defer ts.Close()
-
-	s := newTestService(t, "3.0.0", "stable", ts.URL)
 	st, err := s.Check(context.Background())
 	if err != nil {
 		t.Fatalf("Check: %v", err)
@@ -270,13 +278,10 @@ func TestCheckAggregatesNotesAcrossVersions(t *testing.T) {
 // A single-version jump carries no synthetic "## <tag>" heading, but the body is
 // still sanitized for display (SHA + "(@author)" + "## Changelog" stripped).
 func TestCheckSingleVersionNotesCleaned(t *testing.T) {
-	ts := mockReleases(t, []ghRelease{
-		{TagName: "v3.0.0"},
-		withAssets(ghRelease{TagName: "v3.1.0", HTMLURL: "https://example/v3.1.0", Body: "## Changelog\n### Features\n* 12d8eaacc0b65e76dede78bc67252c8f3be31827: feat: only hop (@txperl)"}),
+	s := newTestService(t, "3.0.0", "stable", []releaseEntry{
+		{Tag: "v3.0.0"},
+		withAssets(releaseEntry{Tag: "v3.1.0", HTMLURL: "https://example/v3.1.0", Notes: "## Changelog\n### Features\n* 12d8eaacc0b65e76dede78bc67252c8f3be31827: feat: only hop (@txperl)"}),
 	})
-	defer ts.Close()
-
-	s := newTestService(t, "3.0.0", "stable", ts.URL)
 	st, err := s.Check(context.Background())
 	if err != nil {
 		t.Fatalf("Check: %v", err)
@@ -307,7 +312,7 @@ func assertCleanedNotes(t *testing.T, notes string) {
 }
 
 func TestApplyRefusesDevBuild(t *testing.T) {
-	s := NewService("0.1.0-dev", "txperl", "PixivBiu", config.UpdateConfig{}, "")
+	s := NewService("0.1.0-dev", "https://dl.invalid", nil, config.UpdateConfig{}, "")
 	err := s.Apply(context.Background())
 	var ue *Error
 	if !errors.As(err, &ue) || ue.Kind != KindRefused {
@@ -315,28 +320,69 @@ func TestApplyRefusesDevBuild(t *testing.T) {
 	}
 }
 
-// A non-2xx from GitHub must classify as upstream so the API returns 502, not a
+// A non-2xx from the feed must classify as upstream so the API returns 502, not a
 // 400 with raw text.
-func TestCheckClassifiesGithubFailureAsUpstream(t *testing.T) {
+func TestCheckClassifiesFeedFailureAsUpstream(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}))
 	defer ts.Close()
 
-	s := newTestService(t, "3.0.0", "stable", ts.URL)
+	s := NewService("3.0.0", ts.URL, []string{"unused"}, config.UpdateConfig{Enabled: true, Channel: "stable"}, "")
 	_, err := s.Check(context.Background())
 	var ue *Error
 	if !errors.As(err, &ue) || ue.Kind != KindUpstream {
-		t.Fatalf("Check against a failing GitHub = %v, want a KindUpstream *Error", err)
+		t.Fatalf("Check against a failing feed = %v, want a KindUpstream *Error", err)
+	}
+}
+
+// A manifest whose signature doesn't verify under the trusted key must be refused
+// outright — an unverifiable feed is never parsed or trusted. This is the core
+// guarantee of the minisign migration: tampering with the feed (even with valid
+// JSON) cannot push an update.
+func TestCheckRejectsInvalidSignature(t *testing.T) {
+	// Sign with one key but trust a different one → verification must fail.
+	_, signingPriv, err := minisign.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate signing key: %v", err)
+	}
+	trustedPub, _, err := minisign.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate trusted key: %v", err)
+	}
+	data, err := json.Marshal(manifest{Schema: 1, Releases: []releaseEntry{
+		withAssets(releaseEntry{Tag: "v3.1.0", HTMLURL: "https://example/v3.1.0"}),
+	}})
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+	feedURL := serveManifest(t, data, minisign.Sign(signingPriv, data))
+
+	s := NewService("3.0.0", feedURL, []string{trustedPub.String()}, config.UpdateConfig{Enabled: true, Channel: "stable"}, "")
+	_, err = s.Check(context.Background())
+	var ue *Error
+	if !errors.As(err, &ue) || ue.Kind != KindRefused {
+		t.Fatalf("Check with a bad signature = %v, want a KindRefused *Error", err)
+	}
+}
+
+// No trusted key configured must also fail closed: without a key we cannot verify
+// the feed, so no update is ever offered (the placeholder build state).
+func TestCheckWithoutTrustedKeyIsRefused(t *testing.T) {
+	feedURL, _ := signedFeed(t, []releaseEntry{
+		withAssets(releaseEntry{Tag: "v3.1.0", HTMLURL: "https://example/v3.1.0"}),
+	})
+	s := NewService("3.0.0", feedURL, nil, config.UpdateConfig{Enabled: true, Channel: "stable"}, "")
+	_, err := s.Check(context.Background())
+	var ue *Error
+	if !errors.As(err, &ue) || ue.Kind != KindRefused {
+		t.Fatalf("Check with no trusted key = %v, want a KindRefused *Error", err)
 	}
 }
 
 // "no applicable release" is a refusal (precondition), not a transport failure.
 func TestCheckNoApplicableReleaseIsRefused(t *testing.T) {
-	ts := mockReleases(t, []ghRelease{{TagName: "v2.6.4b"}}) // legacy non-semver only
-	defer ts.Close()
-
-	s := newTestService(t, "3.0.0", "stable", ts.URL)
+	s := newTestService(t, "3.0.0", "stable", []releaseEntry{{Tag: "v2.6.4b"}}) // legacy non-semver only
 	_, err := s.Check(context.Background())
 	var ue *Error
 	if !errors.As(err, &ue) || ue.Kind != KindRefused {

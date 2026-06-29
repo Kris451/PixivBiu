@@ -2,11 +2,7 @@ package update
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
-	"io"
 	"log/slog"
-	"net/http"
 	"regexp"
 	"sort"
 	"strings"
@@ -101,48 +97,23 @@ func (s *Service) loop(ctx context.Context, logger *slog.Logger) {
 	}
 }
 
-// githubAPI is the releases endpoint base. A var (not const) so tests can point
-// it at an httptest server.
-var githubAPI = "https://api.github.com"
-
-// ghRelease is the subset of the GitHub release object we consume.
-type ghRelease struct {
-	TagName     string    `json:"tag_name"`
-	Name        string    `json:"name"`
-	Body        string    `json:"body"`
-	Draft       bool      `json:"draft"`
-	Prerelease  bool      `json:"prerelease"`
-	HTMLURL     string    `json:"html_url"`
-	PublishedAt time.Time `json:"published_at"`
-	Assets      []ghAsset `json:"assets"`
-}
-
-type ghAsset struct {
-	Name               string `json:"name"`
-	BrowserDownloadURL string `json:"browser_download_url"`
-	Size               int64  `json:"size"`
-}
-
 // releaseInfo is the resolved "newest applicable release" shared by Check and
-// Apply. Assets are indexed by name for asset/checksums lookup.
+// Apply. Assets are indexed by name for archive lookup.
 type releaseInfo struct {
 	tag         string
 	version     string // normalized semver with leading "v"
 	notes       string
 	htmlURL     string
 	publishedAt time.Time
-	assets      map[string]ghAsset
+	assets      map[string]asset
 }
 
-// hasBinaryForThisPlatform reports whether the release carries everything Apply
-// needs for the running OS/arch: the archive built for this platform plus the
-// checksums.txt used to verify it. Check gates UpdateAvailable on this so it
-// never advertises an update Apply would immediately refuse.
+// hasBinaryForThisPlatform reports whether the release carries the archive built
+// for the running OS/arch (its SHA-256 travels inline in the signed manifest, so
+// no separate checksums file is needed). Check gates UpdateAvailable on this so
+// it never advertises an update Apply would immediately refuse.
 func (ri *releaseInfo) hasBinaryForThisPlatform() bool {
-	if _, ok := ri.assets[assetName(ri.version)]; !ok {
-		return false
-	}
-	_, ok := ri.assets["checksums.txt"]
+	_, ok := ri.assets[assetName(ri.version)]
 	return ok
 }
 
@@ -172,10 +143,10 @@ func (s *Service) Check(ctx context.Context) (Status, error) {
 
 	// An update is offered only when it is strictly newer, a real release build
 	// (not a dev/`go run`/local build, which is meaningless to swap), and
-	// actually installable on this platform — the release must carry both the
-	// archive for this OS/arch and its checksums.txt. Otherwise Apply would
-	// refuse it, leaving the user a badge/button that can never succeed. The
-	// latest version is still recorded above for display regardless.
+	// actually installable on this platform — the release must carry the archive
+	// for this OS/arch (its SHA-256 is inline in the signed manifest). Otherwise
+	// Apply would refuse it, leaving the user a badge/button that can never
+	// succeed. The latest version is still recorded above for display regardless.
 	applicable := ri.hasBinaryForThisPlatform()
 	s.status.AssetName = ""
 	if applicable {
@@ -195,7 +166,7 @@ func (s *Service) Check(ctx context.Context) (Status, error) {
 // unknown prerelease suffixes (releaseRank -1). An unknown channel falls back to
 // the stable floor.
 func (s *Service) resolveLatest(ctx context.Context) (*releaseInfo, error) {
-	releases, err := s.fetchReleases(ctx)
+	releases, err := s.fetchManifest(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -204,7 +175,7 @@ func (s *Service) resolveLatest(ctx context.Context) (*releaseInfo, error) {
 	if !ok {
 		floor = channelFloor["stable"]
 	}
-	var best *ghRelease
+	var best *releaseEntry
 	var bestVer string
 	for i := range releases {
 		r := &releases[i]
@@ -221,12 +192,12 @@ func (s *Service) resolveLatest(ctx context.Context) (*releaseInfo, error) {
 		return nil, refusedf("no applicable release found")
 	}
 
-	assets := make(map[string]ghAsset, len(best.Assets))
+	assets := make(map[string]asset, len(best.Assets))
 	for _, a := range best.Assets {
 		assets[a.Name] = a
 	}
 	return &releaseInfo{
-		tag:         normalizeVersion(best.TagName),
+		tag:         normalizeVersion(best.Tag),
 		version:     bestVer,
 		notes:       aggregateNotes(releases, floor, s.current),
 		htmlURL:     best.HTMLURL,
@@ -235,16 +206,14 @@ func (s *Service) resolveLatest(ctx context.Context) (*releaseInfo, error) {
 	}, nil
 }
 
-// applicableVersion reports whether r is a release this channel can offer — not a
-// draft, a valid semver tag, and at or above the channel's maturity floor — and
-// returns its normalized version so callers reuse it without re-parsing. Shared by
+// applicableVersion reports whether r is a release this channel can offer — a
+// valid semver tag at or above the channel's maturity floor — and returns its
+// normalized version so callers reuse it without re-parsing. Shared by
 // resolveLatest (which picks the single newest) and aggregateNotes (which collects
-// the whole in-range set) so the predicate can't drift between them.
-func applicableVersion(r *ghRelease, floor int) (string, bool) {
-	if r.Draft {
-		return "", false
-	}
-	v := normalizeVersion(r.TagName)
+// the whole in-range set) so the predicate can't drift between them. The feed is
+// built from published releases only, so there is no draft state to filter here.
+func applicableVersion(r *releaseEntry, floor int) (string, bool) {
+	v := normalizeVersion(r.Tag)
 	if !semver.IsValid(v) || releaseRank(v) < floor {
 		return "", false
 	}
@@ -297,10 +266,10 @@ func sanitizeReleaseBody(body string) string {
 // When current is not valid semver (a dev build, where updates are never offered
 // anyway) the lower bound is meaningless, so only the newest applicable release
 // is kept.
-func aggregateNotes(releases []ghRelease, floor int, current string) string {
+func aggregateNotes(releases []releaseEntry, floor int, current string) string {
 	cur := normalizeVersion(current)
 
-	var inRange []*ghRelease
+	var inRange []*releaseEntry
 	for i := range releases {
 		r := &releases[i]
 		v, ok := applicableVersion(r, floor)
@@ -316,13 +285,13 @@ func aggregateNotes(releases []ghRelease, floor int, current string) string {
 		return ""
 	}
 	sort.Slice(inRange, func(i, j int) bool {
-		return semver.Compare(normalizeVersion(inRange[i].TagName), normalizeVersion(inRange[j].TagName)) > 0
+		return semver.Compare(normalizeVersion(inRange[i].Tag), normalizeVersion(inRange[j].Tag)) > 0
 	})
 
 	// Nothing to stitch — one release, or a dev build with no usable lower bound:
 	// just the newest body, sanitized, with no per-version heading.
 	if len(inRange) == 1 || !semver.IsValid(cur) {
-		return sanitizeReleaseBody(inRange[0].Body)
+		return sanitizeReleaseBody(inRange[0].Notes)
 	}
 
 	var b strings.Builder
@@ -334,43 +303,9 @@ func aggregateNotes(releases []ghRelease, floor int, current string) string {
 		// configured in .goreleaser.yaml); the frontend maps h2 -> version heading,
 		// h3 -> group heading. Keep these three in sync.
 		b.WriteString("## ")
-		b.WriteString(normalizeVersion(r.TagName))
+		b.WriteString(normalizeVersion(r.Tag))
 		b.WriteString("\n\n")
-		b.WriteString(sanitizeReleaseBody(r.Body))
+		b.WriteString(sanitizeReleaseBody(r.Notes))
 	}
 	return b.String()
-}
-
-// fetchReleases pulls the most recent releases (newest first). The page also
-// bounds how far back aggregateNotes can stitch changelogs for a multi-version
-// jump; 20 covers any realistic gap between checks for this project's cadence.
-func (s *Service) fetchReleases(ctx context.Context) ([]ghRelease, error) {
-	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	defer cancel()
-
-	endpoint := fmt.Sprintf("%s/repos/%s/%s/releases?per_page=20", githubAPI, s.owner, s.repo)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return nil, internalErr("could not build github request", err)
-	}
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("User-Agent", userAgent)
-
-	resp, err := s.httpClient().Do(req)
-	if err != nil {
-		return nil, upstreamErr(fmt.Errorf("contact github: %w", err))
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		// Read a little of the body for context, but keep the message generic.
-		io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
-		return nil, upstreamErr(fmt.Errorf("github returned HTTP %d", resp.StatusCode))
-	}
-
-	var releases []ghRelease
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&releases); err != nil {
-		return nil, upstreamErr(fmt.Errorf("decode github response: %w", err))
-	}
-	return releases, nil
 }

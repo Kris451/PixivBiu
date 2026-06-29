@@ -10,7 +10,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"net/http"
 	"path"
 	"runtime"
 	"strings"
@@ -25,7 +24,7 @@ import (
 const maxDownload = 200 << 20 // 200 MiB
 
 // Apply downloads the release archive built for this OS/arch, verifies its
-// SHA-256 against the release's checksums.txt, extracts the binary, and swaps
+// SHA-256 against the (signed) manifest entry, extracts the binary, and swaps
 // it into place at the running executable's path. On success the caller should
 // restart the process (the existing reexec path) so the new binary takes over.
 //
@@ -62,23 +61,20 @@ func (s *Service) Apply(ctx context.Context) error {
 	}
 
 	name := assetName(ri.version)
-	asset, ok := ri.assets[name]
+	a, ok := ri.assets[name]
 	if !ok {
 		return refusedf("release %s has no asset for this platform (%s)", ri.tag, name)
 	}
-	sumAsset, ok := ri.assets["checksums.txt"]
-	if !ok {
-		return refusedf("release %s is missing checksums.txt; cannot verify download", ri.tag)
+	want := strings.ToLower(strings.TrimSpace(a.SHA256))
+	if want == "" {
+		return refusedf("release %s carries no checksum for %s; cannot verify download", ri.tag, name)
 	}
 
-	// fetchChecksum / download return categorized errors (upstream on a
-	// transport/HTTP failure, refused when the asset is absent from the list).
-	want, err := s.fetchChecksum(ctx, sumAsset.BrowserDownloadURL, name)
-	if err != nil {
-		return err
-	}
-
-	archive, err := s.download(ctx, asset.BrowserDownloadURL)
+	// download returns categorized errors (upstream on a transport/HTTP failure).
+	// The expected SHA-256 comes from the signed manifest, so verifying the
+	// download against it transitively authenticates the binary — no separate
+	// checksums.txt fetch is needed.
+	archive, err := s.download(ctx, a.URL)
 	if err != nil {
 		return err
 	}
@@ -114,49 +110,13 @@ func binaryName() string {
 
 // download fetches url fully into memory under a generous deadline. Archives
 // are small enough that buffering avoids a temp-file dance; selfupdate streams
-// the extracted binary from the buffer.
+// the extracted binary from the buffer. It shares fetchBytes' transport + error
+// categorization, adding only the larger archive cap and a 5-minute ceiling (the
+// manifest check uses the caller's shorter context instead).
 func (s *Service) download(ctx context.Context, url string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, internalErr("could not build download request", err)
-	}
-	req.Header.Set("User-Agent", userAgent)
-
-	resp, err := s.httpClient().Do(req)
-	if err != nil {
-		return nil, upstreamErr(fmt.Errorf("download %s: %w", url, err))
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, upstreamErr(fmt.Errorf("download %s: HTTP %d", url, resp.StatusCode))
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxDownload))
-	if err != nil {
-		return nil, upstreamErr(fmt.Errorf("read %s: %w", url, err))
-	}
-	return body, nil
-}
-
-// fetchChecksum downloads checksums.txt and returns the lowercase hex SHA-256
-// recorded for assetName. Each line is "<sha256>  <filename>" (GoReleaser).
-func (s *Service) fetchChecksum(ctx context.Context, url, assetName string) (string, error) {
-	data, err := s.download(ctx, url) // already categorized (upstream on failure)
-	if err != nil {
-		return "", err
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) != 2 {
-			continue
-		}
-		if fields[1] == assetName {
-			return strings.ToLower(fields[0]), nil
-		}
-	}
-	return "", refusedf("checksums.txt has no entry for %s", assetName)
+	return s.fetchBytes(ctx, url, maxDownload)
 }
 
 // extractBinary returns the PixivBiu executable bytes from a release archive.

@@ -3,6 +3,7 @@ module github.com/txperl/PixivBiu
 go 1.26.1
 
 require (
+	aead.dev/minisign v0.2.0
 	github.com/HugoSmits86/nativewebp v1.2.1
 	github.com/getkin/kin-openapi v0.133.0
 	github.com/go-chi/chi/v5 v5.2.5
@@ -20,7 +21,6 @@ require (
 )
 
 require (
-	aead.dev/minisign v0.2.0 // indirect
 	github.com/apapsch/go-jsonmerge/v2 v2.0.0 // indirect
 	github.com/dprotaso/go-yit v0.0.0-20220510233725-9ba8df137936 // indirect
 	github.com/fsnotify/fsnotify v1.9.0 // indirect

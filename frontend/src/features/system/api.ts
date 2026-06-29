@@ -11,13 +11,13 @@ export async function getSystemVersion(): Promise<Result<SystemVersion>> {
     return { data: data ?? null, error: error ?? null };
 }
 
-// Cached status — no network call to GitHub, no auth required.
+// Cached status — no network call to the update server, no auth required.
 export async function getUpdateStatus(): Promise<Result<UpdateStatus>> {
     const { data, error } = await api.GET("/system/update");
     return { data: data ?? null, error: error ?? null };
 }
 
-// Forces a fresh check against GitHub (requires auth).
+// Forces a fresh check against the release feed (requires auth).
 export async function checkForUpdate(): Promise<Result<UpdateStatus>> {
     const { data, error } = await api.POST("/system/update/check");
     return { data: data ?? null, error: error ?? null };

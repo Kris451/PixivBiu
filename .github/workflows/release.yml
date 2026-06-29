@@ -1,7 +1,9 @@
 name: Release
 
-# Cross-compiles the self-contained binaries (frontend embedded) and publishes
-# a GitHub Release. Triggered by pushing a semver tag, e.g.:
+# Cross-compiles the self-contained binaries (frontend embedded), publishes a
+# GitHub Release (the human-readable notes page + mirror), and — the source the
+# app's self-updater actually reads — uploads the archives plus a minisign-signed
+# manifest.json to Cloudflare R2 behind a CDN. Triggered by pushing a semver tag:
 #   git tag v3.0.0 && git push origin v3.0.0
 on:
   push:
@@ -90,3 +92,145 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # minisign signs the manifest below. The Ubuntu package is the upstream
+      # jedisct1/minisign; its signature format is verified by the in-app updater
+      # (aead.dev/minisign), so the two interoperate.
+      - name: Install minisign
+        run: sudo apt-get update && sudo apt-get install -y minisign
+
+      # Publish to Cloudflare R2 — the source the self-updater reads. Uploads the
+      # archives under an immutable, version-pinned path, then assembles, signs,
+      # and uploads manifest.json (+ .minisig) and (optionally) purges its edge
+      # cache. The GitHub Release created above is the dual-publish mirror.
+      #
+      # Required secrets/vars (see the migration plan):
+      #   secrets.R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY  — R2 API token
+      #   secrets.R2_ENDPOINT   — https://<accountid>.r2.cloudflarestorage.com
+      #   secrets.R2_BUCKET     — target bucket name
+      #   secrets.MINISIGN_SECRET_KEY — unencrypted minisign secret key (file body)
+      #   vars.UPDATE_FEED_BASE — public CDN base, MUST equal updateFeedURL in
+      #                           cmd/server/main.go (e.g. https://dl.pixivbiu.example)
+      # Optional:
+      #   secrets.CLOUDFLARE_API_TOKEN / CLOUDFLARE_ZONE_ID — enable the cache purge;
+      #     without them the manifest's max-age=300 expires a stale edge copy on its
+      #     own within ~5 min (the purge just makes the new release visible sooner).
+      - name: Publish release to Cloudflare R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          # R2 historically rejected aws-cli v2's default integrity checksums;
+          # only send them when an operation requires them.
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+          # aws-cli v2 reads the R2 S3 endpoint from this env var, so every `aws s3`
+          # call below targets R2 without repeating --endpoint-url.
+          AWS_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          FEED_BASE: ${{ vars.UPDATE_FEED_BASE }}
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          # Public half of MINISIGN_SECRET_KEY (also baked into cmd/server/main.go's
+          # updateTrustedKeys). Used to verify the existing R2 feed before re-signing
+          # it, so a tampered manifest can't be blessed with the CI key. Public — safe
+          # to commit; on key rotation, update this alongside main.go.
+          MINISIGN_PUBLIC_KEY: "RWQOyv9QUnFCe8RY2/0hY1ng/4zammgmWt0Vo1Jz2XkfpXQGfJiyZBvT"
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          # Fail loudly on an empty UPDATE_FEED_BASE: it's a defined-but-empty env var
+          # (set -u won't catch it), and an empty base would sign asset URLs like
+          # "/releases/<tag>/<file>" — uploaded and signed fine, but undownloadable.
+          : "${FEED_BASE:?UPDATE_FEED_BASE variable must be set to the public CDN base (e.g. https://dl.example)}"
+          base="${FEED_BASE%/}"
+          now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"   # one publish instant for the whole run
+
+          # 1) Upload the platform archives under an immutable, version-pinned
+          #    path (content-addressed by tag → cache forever). checksums.txt is
+          #    NOT uploaded: the signed manifest is the only authoritative source
+          #    on the CDN — an unsigned checksums.txt there would just mislead.
+          for f in dist/*.tar.gz dist/*.zip; do
+            [ -e "$f" ] || continue
+            aws s3 cp "$f" "s3://${R2_BUCKET}/releases/${TAG}/$(basename "$f")" \
+              --cache-control "public, max-age=31536000, immutable"
+          done
+
+          # 2) Build this release's manifest entry. Notes are the exact GoReleaser
+          #    changelog already posted as the GitHub release body, so the in-app
+          #    notes match and the client's existing sanitizer keeps working.
+          notes="$(gh release view "$TAG" --json body --jq .body)"
+          assets='[]'
+          while read -r sha name; do
+            [ -n "$name" ] || continue
+            case "$name" in *.tar.gz|*.zip) ;; *) continue ;; esac
+            size="$(stat -c%s "dist/${name}")"
+            assets="$(jq -c \
+              --arg n "$name" \
+              --arg u "${base}/releases/${TAG}/${name}" \
+              --argjson s "$size" \
+              --arg h "$sha" \
+              '. + [{name:$n, url:$u, size:$s, sha256:($h|ascii_downcase)}]' <<<"$assets")"
+          done < dist/checksums.txt
+
+          entry="$(jq -nc \
+            --arg tag "$TAG" \
+            --arg ver "${TAG#v}" \
+            --arg pub "$now" \
+            --arg url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${TAG}" \
+            --arg notes "$notes" \
+            --argjson assets "$assets" \
+            '{tag:$tag, version:$ver, published_at:$pub, html_url:$url, notes:$notes, assets:$assets}')"
+
+          # 3) Fetch the existing feed and VERIFY its signature before extending it.
+          #    The manifest on R2 is mutable; re-signing it unchecked would let anyone
+          #    with bucket write access inject an entry that this step then blesses
+          #    with the CI signing key — clients would trust the forged "latest". A
+          #    missing or unverifiable manifest → start fresh (safe: only recent-version
+          #    note history is lost, never the release). Then drop any same-tag entry
+          #    (idempotent re-runs), prepend the new one, keep the most recent 20
+          #    (array order is cosmetic — the client re-sorts by semver).
+          if ! { aws s3 cp "s3://${R2_BUCKET}/manifest.json" old.json 2>/dev/null \
+              && aws s3 cp "s3://${R2_BUCKET}/manifest.json.minisig" old.json.minisig 2>/dev/null \
+              && minisign -Vm old.json -P "$MINISIGN_PUBLIC_KEY" >/dev/null 2>&1; }; then
+            echo "no verifiable existing manifest; starting a fresh feed" >&2
+            echo '{"releases":[]}' > old.json
+          fi
+          jq \
+            --argjson entry "$entry" \
+            --arg gen "$now" \
+            '{schema:1, generated_at:$gen,
+              releases: ([$entry] + ((.releases // []) | map(select(.tag != $entry.tag))))[0:20]}' \
+            old.json > manifest.json
+
+          # 4) Sign the manifest (unencrypted CI key; the secret lives only in the
+          #    GitHub secret). The client verifies this before trusting any field.
+          printf '%s\n' "$MINISIGN_SECRET_KEY" > minisign.key
+          minisign -S -s minisign.key -m manifest.json
+          rm -f minisign.key
+
+          # 5) Upload the manifest + signature — the only mutable objects — with a
+          #    short TTL so a stale edge copy self-heals even if a purge is missed.
+          for f in manifest.json manifest.json.minisig; do
+            aws s3 cp "$f" "s3://${R2_BUCKET}/${f}" \
+              --cache-control "public, max-age=300, must-revalidate"
+          done
+
+          # 6) Purge the manifest + signature from Cloudflare's edge so clients see
+          #    the release within seconds (immutable archives are never purged).
+          #    Optional: without the token/zone the manifest's max-age=300 expires a
+          #    stale edge copy on its own within ~5 min, so skip cleanly rather than
+          #    fail the release.
+          if [ -n "${CLOUDFLARE_API_TOKEN:-}" ] && [ -n "${CLOUDFLARE_ZONE_ID:-}" ]; then
+            curl -fsS -X POST \
+              "https://api.cloudflare.com/client/v4/zones/${CLOUDFLARE_ZONE_ID}/purge_cache" \
+              -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+              -H "Content-Type: application/json" \
+              --data "{\"files\":[\"${base}/manifest.json\",\"${base}/manifest.json.minisig\"]}"
+            echo "purged manifest + signature from the edge cache"
+          else
+            echo "skipping cache purge (CLOUDFLARE_API_TOKEN / CLOUDFLARE_ZONE_ID not set); max-age=300 expires the stale copy within ~5 min"
+          fi

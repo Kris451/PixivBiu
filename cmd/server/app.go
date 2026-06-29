@@ -158,11 +158,12 @@ func newApp(root, settingsPath string, openFlag *bool, openFlagSet bool) (*app, 
 
 	a.restartCh = make(chan struct{})
 
-	// updSvc checks GitHub for newer releases and backs the one-click
-	// self-update. It reuses pixiv.proxy so update traffic takes the same path
-	// users already configured for Pixiv (e.g. behind the GFW). Start launches
-	// the periodic background check, honoring app.update.enabled / interval live.
-	a.updSvc = update.NewService(version, repoOwner, repoName, a.cfg.App.Update, a.cfg.Pixiv.Proxy)
+	// updSvc checks the signed release feed (Cloudflare R2 + CDN) for newer
+	// releases and backs the one-click self-update. It reuses pixiv.proxy so update
+	// traffic takes the same path users already configured for Pixiv (e.g. behind
+	// the GFW). Start launches the periodic background check, honoring
+	// app.update.enabled / interval live.
+	a.updSvc = update.NewService(version, updateFeedURL, updateTrustedKeys, a.cfg.App.Update, a.cfg.Pixiv.Proxy)
 
 	// imgProxy backs GET /proxy/img: it fetches i.pximg.net images with the
 	// Pixiv Referer and disk-caches them under usr/cache/img (anchored to the

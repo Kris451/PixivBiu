@@ -17,11 +17,22 @@ import (
 //	go build -ldflags "-X main.version=1.2.3"
 var version = "0.1.0-dev"
 
-// repoOwner/repoName identify the GitHub repo the updater checks for releases.
-const (
-	repoOwner = "txperl"
-	repoName  = "PixivBiu"
-)
+// updateFeedURL is the base URL of the signed release feed (manifest.json and the
+// per-version archives) served from Cloudflare R2 behind a CDN. The updater
+// fetches <updateFeedURL>/manifest.json (+ .minisig) instead of the GitHub API.
+// It MUST match the UPDATE_FEED_BASE variable the release workflow uploads against.
+const updateFeedURL = "https://dl.biu.tls.moe"
+
+// updateTrustedKeys are the minisign (Ed25519) public keys the updater accepts as
+// signers of manifest.json. The matching secret key lives only in CI (the
+// MINISIGN_SECRET_KEY secret) and signs the feed at release time; the client
+// verifies the signature before trusting the feed (see internal/update). It is a
+// slice so a key can be rotated by shipping the next public key in a release
+// before switching the signing key. An empty set makes verification fail closed.
+var updateTrustedKeys = []string{
+	// minisign public key 7B42715250FFCA0E
+	"RWQOyv9QUnFCe8RY2/0hY1ng/4zammgmWt0Vo1Jz2XkfpXQGfJiyZBvT",
+}
 
 func main() {
 	if err := run(); err != nil {
