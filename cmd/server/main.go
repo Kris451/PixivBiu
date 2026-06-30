@@ -35,6 +35,7 @@ var updateTrustedKeys = []string{
 }
 
 func main() {
+	suppressSIGPIPE()
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "fatal:", err)
 		// On Windows a double-clicked console window closes the instant we
@@ -45,10 +46,25 @@ func main() {
 	}
 }
 
+// suppressSIGPIPE stops a broken or closed stdout/stderr from terminating the
+// process. Per the os/signal contract, once SIGPIPE is delivered to a Notify
+// channel the runtime no longer applies its default "exit on a write to fd 1/2"
+// behavior — the write merely fails with EPIPE. That matters when log.file has
+// taken over logging but the inherited stdio (e.g. a desktop GUI parent whose
+// pipe has gone away) is dead: the boot banner and any os.Stderr prints must
+// not kill the server. We never act on the notifications, so a small buffered
+// channel we never drain is enough — suppression persists regardless, and extra
+// signals are simply dropped. (SIGPIPE never fires on Windows; the call is a
+// harmless no-op there.)
+func suppressSIGPIPE() {
+	signal.Notify(make(chan os.Signal, 1), syscall.SIGPIPE)
+}
+
 func run() error {
 	configPath := flag.String("config", "./usr/settings.json", "path to runtime settings file (managed via API)")
 	openFlag := flag.Bool("open", false, "open the web UI in the default browser at startup (overrides app.open_browser)")
-	dataDir := flag.String("data-dir", "", "base directory for runtime files (settings, auth state, image cache, default downloads); defaults to the executable's directory. Also settable via PIXIVBIU_DATA_DIR; desktop builds point this at the OS user-data dir.")
+	dataDir := flag.String("data-dir", "", "base directory for runtime files (settings, auth state, default downloads, and the image cache unless -cache-dir is set); defaults to the executable's directory. Also settable via PIXIVBIU_DATA_DIR; desktop builds point this at the OS user-data dir.")
+	cacheDir := flag.String("cache-dir", "", "base directory for purgeable caches (image cache); defaults to usr/cache under the data root. Also settable via PIXIVBIU_CACHE_DIR; desktop builds point this at the OS cache dir so a large regenerable cache stays out of the app-data dir.")
 	flag.Parse()
 
 	// Anchor for every runtime path below — the config/state/index files,
@@ -59,6 +75,12 @@ func run() error {
 	// -data-dir / PIXIVBIU_DATA_DIR precedence and the desktop use case.
 	root := runtimepath.DataRoot(*dataDir)
 
+	// The image cache is a relocatable sibling of the data root: by default it
+	// lives at usr/cache under root (consolidated layout), but -cache-dir /
+	// PIXIVBIU_CACHE_DIR carve it out so the desktop shell can park a large,
+	// regenerable cache in the OS cache dir instead of the backed-up app-data dir.
+	cacheRoot := runtimepath.CacheRoot(*cacheDir, root)
+
 	// The -config DEFAULT is anchored to the binary dir; a value the user
 	// passed explicitly keeps normal shell/CWD semantics.
 	settingsPath := *configPath
@@ -66,7 +88,7 @@ func run() error {
 		settingsPath = runtimepath.Anchor(root, settingsPath)
 	}
 
-	a, err := newApp(root, settingsPath, openFlag, flagPassed("open"))
+	a, err := newApp(root, cacheRoot, settingsPath, openFlag, flagPassed("open"))
 	if err != nil {
 		return err
 	}

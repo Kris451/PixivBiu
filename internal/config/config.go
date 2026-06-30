@@ -76,6 +76,7 @@ type TimeoutsConfig struct {
 type LogConfig struct {
 	Level  string `koanf:"level"  cfg:"enum=debug|info|warn|error,advanced=true"`  // log level
 	Format string `koanf:"format" cfg:"enum=text|json,restart=true,advanced=true"` // output format
+	File   string `koanf:"file"   cfg:"restart=true,internal=true"`                // log file path (empty = stdout only); desktop builds set this to the OS logs dir
 }
 
 type PixivConfig struct {
@@ -182,6 +183,7 @@ var baseDefaults = sync.OnceValue(func() map[string]any {
 		"server.timeouts.shutdown": "10s",
 		"log.level":                "info",
 		"log.format":               "text",
+		"log.file":                 "",
 		"pixiv.proxy":              "",
 		"pixiv.bypass_sni":         false,
 		"pixiv.state_file":         "./usr/state.json",

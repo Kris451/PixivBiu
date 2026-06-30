@@ -22,7 +22,7 @@ const cfgMessageKey = (field: FieldSpec): string => `cfg_${field.key.replaceAll(
 
 export function useFieldText(): (field: FieldSpec) => string {
     const m = useMessages();
-    // Keyed by `cfg_` + field.key.replaceAll(".", "_"). Covers all 30 leaf
+    // Keyed by `cfg_` + field.key.replaceAll(".", "_"). Covers all 31 leaf
     // fields; anything else falls through to the raw field.key.
     const map: Record<string, () => string> = {
         cfg_app_language: () => m.cfg_app_language(),
@@ -37,6 +37,7 @@ export function useFieldText(): (field: FieldSpec) => string {
         cfg_server_timeouts_shutdown: () => m.cfg_server_timeouts_shutdown(),
         cfg_log_level: () => m.cfg_log_level(),
         cfg_log_format: () => m.cfg_log_format(),
+        cfg_log_file: () => m.cfg_log_file(),
         cfg_pixiv_proxy: () => m.cfg_pixiv_proxy(),
         cfg_pixiv_bypass_sni: () => m.cfg_pixiv_bypass_sni(),
         cfg_pixiv_state_file: () => m.cfg_pixiv_state_file(),
@@ -72,6 +73,7 @@ export function useFieldHint(): (field: FieldSpec) => string | undefined {
     const map: Record<string, () => string> = {
         cfg_server_host: () => m.cfg_server_host_hint(),
         cfg_server_port_fallback: () => m.cfg_server_port_fallback_hint(),
+        cfg_log_file: () => m.cfg_log_file_hint(),
         cfg_app_language: () => m.cfg_app_language_hint(),
         cfg_app_open_browser: () => m.cfg_app_open_browser_hint(),
         cfg_pixiv_proxy: () => m.cfg_pixiv_proxy_hint(),

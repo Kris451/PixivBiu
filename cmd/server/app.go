@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 
@@ -69,7 +70,7 @@ type app struct {
 // settingsPath is the (already anchored) config file; openFlag/openFlagSet
 // carry the -open flag so the config value can be overridden only when it was
 // explicitly passed.
-func newApp(root, settingsPath string, openFlag *bool, openFlagSet bool) (*app, error) {
+func newApp(root, cacheRoot, settingsPath string, openFlag *bool, openFlagSet bool) (*app, error) {
 	a := &app{}
 
 	// Seed the default update channel from the running build's maturity so a
@@ -119,6 +120,10 @@ func newApp(root, settingsPath string, openFlag *bool, openFlagSet bool) (*app, 
 		a.openBrowser = *openFlag
 	}
 
+	// Anchor a relative log.file to the data root (like state/store files) so it
+	// doesn't drift with the CWD; desktop builds pass an absolute OS logs path,
+	// which Anchor returns unchanged.
+	a.cfg.Log.File = runtimepath.Anchor(root, a.cfg.Log.File)
 	logger, levelVar, err := newLogger(a.cfg.Log)
 	if err != nil {
 		return nil, fmt.Errorf("init logger: %w", err)
@@ -166,11 +171,13 @@ func newApp(root, settingsPath string, openFlag *bool, openFlagSet bool) (*app, 
 	a.updSvc = update.NewService(version, updateFeedURL, updateTrustedKeys, a.cfg.App.Update, a.cfg.Pixiv.Proxy)
 
 	// imgProxy backs GET /proxy/img: it fetches i.pximg.net images with the
-	// Pixiv Referer and disk-caches them under usr/cache/img (anchored to the
-	// binary dir like the other usr/ files). It reuses pixiv.proxy and the
-	// download HTTP timeout so image traffic follows the same path/limits.
+	// Pixiv Referer and disk-caches them under <cacheRoot>/img. cacheRoot is
+	// usr/cache under the data root by default (consolidated layout), but
+	// -cache-dir / PIXIVBIU_CACHE_DIR relocate it (the desktop shell points it
+	// at the OS cache dir). It reuses pixiv.proxy and the download HTTP timeout
+	// so image traffic follows the same path/limits.
 	imgProxy, err := imgcache.NewProxy(
-		runtimepath.Anchor(root, "usr/cache/img"),
+		filepath.Join(cacheRoot, "img"),
 		a.cfg.Image.Cache.MaxBytes(),
 		a.cfg.Download.Referer,
 		a.cfg.Pixiv.Proxy,

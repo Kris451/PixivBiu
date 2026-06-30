@@ -320,6 +320,8 @@
     "cfg_server_timeouts_shutdown": "グレースフルシャットダウンのタイムアウト",
     "cfg_log_level": "ログレベル",
     "cfg_log_format": "出力フォーマット",
+    "cfg_log_file": "ログファイル",
+    "cfg_log_file_hint": "ログの書き込み先（空 = コンソールのみ）",
     "cfg_app_language": "アプリ UI 言語",
     "cfg_app_language_hint": "auto はシステムの言語に従います",
     "cfg_app_language_auto": "自動",

@@ -82,6 +82,35 @@ func TestDataRoot(t *testing.T) {
 	}
 }
 
+func TestCacheRoot(t *testing.T) {
+	dataRoot := filepath.FromSlash("/opt/app")
+	// A relative override resolves against the test's CWD.
+	relAbs, err := filepath.Abs(filepath.FromSlash("scratch/cache"))
+	if err != nil {
+		t.Fatalf("filepath.Abs: %v", err)
+	}
+	cases := []struct {
+		name string
+		flag string // -cache-dir flag value (CacheRoot's first argument)
+		env  string // PIXIVBIU_CACHE_DIR ("" = unset)
+		want string
+	}{
+		{"no override falls back to usr/cache under data root", "", "", filepath.Join(dataRoot, "usr/cache")},
+		{"relative override is absolutized", filepath.FromSlash("scratch/cache"), "", relAbs},
+		{"absolute override returned unchanged", filepath.FromSlash("/var/cache/pixivbiu"), "", filepath.FromSlash("/var/cache/pixivbiu")},
+		{"env used when flag arg empty", "", filepath.FromSlash("/opt/pixiv-cache"), filepath.FromSlash("/opt/pixiv-cache")},
+		{"flag arg takes precedence over env", filepath.FromSlash("/opt/from-flag"), filepath.FromSlash("/opt/from-env"), filepath.FromSlash("/opt/from-flag")},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("PIXIVBIU_CACHE_DIR", c.env)
+			if got := CacheRoot(c.flag, dataRoot); got != c.want {
+				t.Errorf("CacheRoot(%q, %q) with PIXIVBIU_CACHE_DIR=%q = %q, want %q", c.flag, dataRoot, c.env, got, c.want)
+			}
+		})
+	}
+}
+
 func TestAnchor(t *testing.T) {
 	root := filepath.FromSlash("/opt/app/bin")
 

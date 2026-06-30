@@ -18,6 +18,7 @@ require (
 	golang.org/x/mod v0.30.0
 	golang.org/x/sync v0.19.0
 	golang.org/x/sys v0.39.0
+	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 )
 
 require (

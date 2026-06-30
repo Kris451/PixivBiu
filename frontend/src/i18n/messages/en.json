@@ -320,6 +320,8 @@
     "cfg_server_timeouts_shutdown": "Graceful shutdown timeout",
     "cfg_log_level": "Log level",
     "cfg_log_format": "Output format",
+    "cfg_log_file": "Log file",
+    "cfg_log_file_hint": "Where logs are written (empty = console only)",
     "cfg_app_language": "Application UI language",
     "cfg_app_language_hint": "auto follows your system language",
     "cfg_app_language_auto": "Auto",

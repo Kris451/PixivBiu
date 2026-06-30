@@ -45,16 +45,45 @@ func Root() string {
 // so state lives under e.g. ~/Library/Application Support/PixivBiu instead
 // of inside the read-only .app bundle.
 func DataRoot(override string) string {
+	if r := overrideRoot(override, "PIXIVBIU_DATA_DIR"); r != "" {
+		return r
+	}
+	return Root()
+}
+
+// overrideRoot resolves an explicit override (or its env fallback) to an
+// absolute path, returning "" when neither is set so the caller can apply its
+// own default. It centralizes the "make absolute so a relative value doesn't
+// drift with the launch CWD" rule shared by every relocatable root.
+func overrideRoot(override, env string) string {
 	if override == "" {
-		override = os.Getenv("PIXIVBIU_DATA_DIR")
+		override = os.Getenv(env)
 	}
 	if override == "" {
-		return Root()
+		return ""
 	}
 	if abs, err := filepath.Abs(override); err == nil {
 		return abs
 	}
 	return override
+}
+
+// CacheRoot returns the base directory for purgeable, machine-local caches
+// (today: the image proxy disk cache). An explicit override relocates it
+// independently of the data root: the -cache-dir flag value, or the
+// PIXIVBIU_CACHE_DIR env var when that flag is empty. The override is made
+// absolute so a relative value doesn't drift with the launch CWD.
+//
+// With no override it falls back to usr/cache under dataRoot, so the standalone
+// binary and Docker keep the original consolidated layout (cache beside the
+// other usr/ files). The desktop shell points the override at the OS cache dir
+// (e.g. ~/Library/Caches/PixivBiu), so a multi-gigabyte regenerable cache stays
+// out of the backed-up/roaming app-data dir DataRoot resolves to.
+func CacheRoot(override, dataRoot string) string {
+	if r := overrideRoot(override, "PIXIVBIU_CACHE_DIR"); r != "" {
+		return r
+	}
+	return Anchor(dataRoot, "usr/cache")
 }
 
 // goBuildTempRE matches Go's temp-build directory segment:
