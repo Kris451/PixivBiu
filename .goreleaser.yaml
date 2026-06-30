@@ -16,17 +16,11 @@ before:
     # has a single source of truth shared with local `make dist`. Runs once;
     # every cross-compile target below embeds the same dist/.
     - make build-web
-    # Compile the Windows executable resources (icon + version info) into per-arch
-    # cmd/server/resource_windows_<arch>.syso. Delegates to `go generate ./cmd/server`
-    # via the Makefile so generation has one source of truth shared with local
-    # regen. The Go linker embeds the matching .syso into each Windows build;
-    # non-Windows builds ignore them via the GOOS/GOARCH filename suffix.
-    - make gen-winres
 
 builds:
   - id: pixivbiu
     main: ./cmd/server
-    binary: PixivBiu
+    binary: pixivbiu
     env:
       - CGO_ENABLED=0 # pure Go; lets one Linux runner cross-compile everything
     flags:
